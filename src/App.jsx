@@ -39,6 +39,7 @@ const appId = 'ping-pong-club-59';
 const RANKS = ['병장', '상병', '일병', '이병'];
 const RANK_ORDER = { '병장': 0, '상병': 1, '일병': 2, '이병': 3 };
 const BETS = [
+  { id: 'softdrink', label: '🥤 음료수', color: 'bg-pink-100 text-blue-600' },
   { id: 'icecream', label: '🍦 아이스크림', color: 'bg-pink-100 text-pink-600' },
   { id: 'ramen', label: '🍜 한강라면', color: 'bg-orange-100 text-orange-600' },
   { id: 'coffee', label: '☕ 해마루 커피', color: 'bg-amber-100 text-amber-700' },
