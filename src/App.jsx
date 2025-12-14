@@ -1,17 +1,17 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Trophy, Users, Swords, History, Plus, Trash2, ChevronRight, Medal, AlertCircle, Activity, Brain, X, Loader2 } from 'lucide-react';
+import { Trophy, Users, Swords, History, Plus, Trash2, ChevronRight, Medal, AlertCircle, Activity, Brain, X, Loader2, Utensils, Pencil, Save } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
   signInAnonymously, 
-  onAuthStateChanged,
-  signInWithCustomToken
+  onAuthStateChanged 
 } from 'firebase/auth';
 import { 
   getFirestore, 
   collection, 
   addDoc, 
   deleteDoc, 
+  updateDoc,
   doc, 
   onSnapshot, 
   query, 
@@ -19,8 +19,7 @@ import {
   serverTimestamp 
 } from 'firebase/firestore';
 
-// --- Firebase Initialization ---
-// 사용자가 제공한 하드코딩된 설정을 우선 적용합니다.
+// --- Firebase Config ---
 const firebaseConfig = {
   apiKey: "AIzaSyAdfU_0hXTkBn55esF7gF8qAw6z2pWUNCg",
   authDomain: "pingpong-a501c.firebaseapp.com",
@@ -31,476 +30,545 @@ const firebaseConfig = {
   measurementId: "G-SYEN26EVNH"
 };
 
-// 앱 초기화 (설정값이 유효할 때만)
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-// 앱 ID는 고정값 사용
 const appId = 'ping-pong-club-59';
 
-// --- AI Engine (Perplexity API) ---
+// --- Constants & Utils ---
+const RANKS = ['병장', '상병', '일병', '이병'];
+const RANK_ORDER = { '병장': 0, '상병': 1, '일병': 2, '이병': 3 };
+const BETS = [
+  { id: 'icecream', label: '🍦 아이스크림', color: 'bg-pink-100 text-pink-600' },
+  { id: 'ramen', label: '🍜 한강라면', color: 'bg-orange-100 text-orange-600' },
+  { id: 'coffee', label: '☕ 해마루 커피', color: 'bg-amber-100 text-amber-700' },
+  { id: 'burger', label: '🍔 버거리', color: 'bg-yellow-100 text-yellow-700' },
+  { id: 'chicken', label: '🍗 푸라닭', color: 'bg-stone-800 text-white' },
+];
+
 const calculateOverall = (stats) => {
   const { power, spin, control, serve, footwork } = stats;
   const total = power + spin + control + serve + footwork;
   return Math.round((total / 50) * 100);
 };
 
-const fetchAIAnalysis = async (stats, playerName) => {
-  let apiKey = "";
-  
-  // API Key 탐색
-  try {
-    if (import.meta.env && import.meta.env.VITE_PERPLEXITY_API_KEY) {
-      apiKey = import.meta.env.VITE_PERPLEXITY_API_KEY;
-    } else if (typeof process !== 'undefined' && process.env) {
-      apiKey = process.env.VITE_PERPLEXITY_API_KEY || process.env.PERPLEXITY_API_KEY;
-    }
-  } catch (e) {
-    console.warn("Env Check Failed", e);
-  }
+// ELO Rating System Implementation
+// K-Factor: 기본 32, 점수차에 따라 가중치 부여 (완승일수록 점수 변동폭 큼)
+const calculateEloChange = (winnerRating, loserRating, scoreDiff) => {
+  const K_BASE = 32;
+  // 점수차 가중치: 3점차(완승) -> 1.5배, 1점차(신승) -> 1.0배
+  const marginMultiplier = 1 + (scoreDiff - 1) * 0.25; 
+  const K = K_BASE * marginMultiplier;
 
-  // 키가 없으면 더미 데이터 대신 안내 메시지 반환
-  if (!apiKey || apiKey === "YOUR_API_KEY_HERE") {
-    return {
-      style: "설정 필요",
-      description: "AI 분석 기능을 사용하려면 배포 환경 변수(VITE_PERPLEXITY_API_KEY) 설정이 필요합니다."
-    };
-  }
+  const expectedScore = 1 / (1 + Math.pow(10, (loserRating - winnerRating) / 400));
+  const ratingChange = Math.round(K * (1 - expectedScore));
+  
+  return ratingChange;
+};
+
+// --- AI API Functions ---
+const getApiKey = () => {
+  try {
+    if (import.meta.env && import.meta.env.VITE_PERPLEXITY_API_KEY) return import.meta.env.VITE_PERPLEXITY_API_KEY;
+  } catch(e) {}
+  return "";
+};
+
+const fetchAIAnalysis = async (stats, playerName) => {
+  const apiKey = getApiKey();
+  if (!apiKey) return { style: "분석 불가", description: "API 키가 설정되지 않았습니다." };
 
   const prompt = `
-    Analyze this table tennis player based on these stats (1-10 scale):
-    Name: ${playerName}
-    Power: ${stats.power}
-    Spin: ${stats.spin}
-    Control: ${stats.control}
-    Serve: ${stats.serve}
-    Footwork: ${stats.footwork}
-
-    Output format (JSON only):
-    {
-      "style": "Short style name (e.g. Aggressive Looper, Defensive Chopper)",
-      "description": "1 sentence analysis of their strengths and playstyle in Korean."
-    }
+    Analyze this table tennis player (Name: ${playerName}) based on stats (1-10):
+    Power:${stats.power}, Spin:${stats.spin}, Control:${stats.control}, Serve:${stats.serve}, Footwork:${stats.footwork}.
+    Output JSON only: { "style": "Style Name (e.g. All-round)", "description": "One sentence Korean summary of playstyle." }
   `;
 
   try {
-    const response = await fetch('https://api.perplexity.ai/chat/completions', {
+    const res = await fetch('https://api.perplexity.ai/chat/completions', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: "sonar",
-        messages: [
-          { role: "system", content: "You are a table tennis expert analyst. Return JSON only." },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.2
+        messages: [{ role: "system", content: "Table tennis expert. JSON only." }, { role: "user", content: prompt }]
       })
     });
+    const data = await res.json();
+    const content = data.choices[0].message.content.replace(/```json|```/g, '').trim();
+    return JSON.parse(content);
+  } catch (e) {
+    console.error(e);
+    return { style: "분석 실패", description: "AI 분석 중 오류가 발생했습니다." };
+  }
+};
 
-    if (!response.ok) {
-      throw new Error(`API Error: ${response.status}`);
-    }
+const fetchMatchAnalysis = async (player, playerMatches) => {
+  const apiKey = getApiKey();
+  if (!apiKey) return "API 키가 없습니다.";
 
-    const data = await response.json();
-    const content = data.choices[0].message.content;
-    const jsonString = content.replace(/```json/g, '').replace(/```/g, '').trim();
-    return JSON.parse(jsonString);
+  // 최근 5경기 요약
+  const recentHistory = playerMatches.slice(0, 5).map(m => {
+    const isWin = m.winnerId === player.id;
+    const opponent = m.player1Id === player.id ? m.player2Name : m.player1Name;
+    return `${opponent}상대 ${isWin ? '승' : '패'} (${m.score1}:${m.score2})`;
+  }).join(", ");
 
-  } catch (error) {
-    console.error("API Error:", error);
-    return {
-      style: "분석 실패",
-      description: `오류가 발생했습니다: ${error.message}`
-    };
+  const prompt = `
+    Analyze match records for table tennis player "${player.name}".
+    Stats: Overall ${player.overall} (Power ${player.stats.power}, Control ${player.stats.control}).
+    Recent Matches: ${recentHistory}.
+    
+    Provide a brief, tactical advice in Korean (max 2 sentences). 
+    Focus on who they lost to and potential weaknesses.
+  `;
+
+  try {
+    const res = await fetch('https://api.perplexity.ai/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: "sonar",
+        messages: [{ role: "system", content: "You are a warm, helpful ping pong coach." }, { role: "user", content: prompt }]
+      })
+    });
+    const data = await res.json();
+    return data.choices[0].message.content;
+  } catch (e) {
+    return "전적 분석 중 오류가 발생했습니다.";
   }
 };
 
 // --- Components ---
-const LoadingSpinner = () => (
-  <div className="flex justify-center items-center p-8">
-    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-red-600"></div>
-  </div>
-);
-
-const EmptyState = ({ message, icon: Icon }) => (
-  <div className="flex flex-col items-center justify-center py-12 text-gray-400">
-    {Icon && <Icon size={48} className="mb-4 opacity-20" />}
-    <p>{message}</p>
-  </div>
-);
-
-const StatBar = ({ label, value, color = "bg-blue-500" }) => (
+const StatBar = ({ label, value, onChange, editable }) => (
   <div className="mb-2">
     <div className="flex justify-between text-xs mb-1">
       <span className="text-gray-600 font-medium">{label}</span>
       <span className="font-bold text-gray-800">{value}</span>
     </div>
-    <div className="w-full bg-gray-200 rounded-full h-2">
-      <div className={`${color} h-2 rounded-full transition-all duration-500`} style={{ width: `${value * 10}%` }}></div>
-    </div>
+    {editable ? (
+      <input type="range" min="1" max="10" value={value} onChange={(e) => onChange(parseInt(e.target.value))} className="w-full h-2 bg-gray-200 rounded-lg accent-red-600 cursor-pointer" />
+    ) : (
+      <div className="w-full bg-gray-200 rounded-full h-2">
+        <div className="bg-red-500 h-2 rounded-full transition-all duration-500" style={{ width: `${value * 10}%` }}></div>
+      </div>
+    )}
   </div>
 );
 
-// --- Main App Component ---
-
+// --- Main App ---
 export default function PingPongApp() {
   const [user, setUser] = useState(null);
-  const [activeTab, setActiveTab] = useState('players'); 
+  const [activeTab, setActiveTab] = useState('players');
   const [players, setPlayers] = useState([]);
   const [matches, setMatches] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
 
-  // Modals
+  // Modal States
   const [showAddPlayer, setShowAddPlayer] = useState(false);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [newPlayerName, setNewPlayerName] = useState('');
-  const [newPlayerStats, setNewPlayerStats] = useState({
-    power: 5, spin: 5, control: 5, serve: 5, footwork: 5
-  });
-
   const [showAddMatch, setShowAddMatch] = useState(false);
-  const [matchForm, setMatchForm] = useState({ p1: '', p2: '', s1: '', s2: '' });
   const [selectedPlayer, setSelectedPlayer] = useState(null);
+  const [isEditing, setIsEditing] = useState(false);
+  
+  // Forms & Processing
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [matchAnalysis, setMatchAnalysis] = useState(null);
+  const [selectedBet, setSelectedBet] = useState(null);
 
-  // 1. Authentication (수정됨: 무한 로딩 방지)
+  const [playerForm, setPlayerForm] = useState({
+    name: '', rank: '이병', stats: { power: 5, spin: 5, control: 5, serve: 5, footwork: 5 }
+  });
+  
+  const [matchForm, setMatchForm] = useState({ p1: '', p2: '', s1: '', s2: '' });
+
+  // Init
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        // 이미 로그인된 상태가 아닐 때만 시도
-        if (!auth.currentUser) {
-           await signInAnonymously(auth);
-        }
-      } catch (err) {
-        console.error("Auth Error:", err);
-        // 에러가 나도 코드가 멈추지 않도록 처리
-        if (err.code === 'auth/configuration-not-found') {
-           setError("Firebase 콘솔에서 'Anonymous Auth'가 꺼져 있습니다. 설정 > Authentication > Sign-in method에서 켜주세요.");
-        } else {
-           setError(`로그인 실패: ${err.message}`);
-        }
-        setLoading(false); // 에러 발생 시 로딩 종료
-      }
-    };
-
-    initAuth();
-    
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setLoading(false); // 상태가 변하면 무조건 로딩 종료
-    });
-
-    // 안전장치: 3초 뒤 강제 로딩 종료 (네트워크 지연 대비)
-    const timeout = setTimeout(() => setLoading(false), 3000);
-
-    return () => {
-      unsubscribe();
-      clearTimeout(timeout);
-    };
+    signInAnonymously(auth).catch(console.error);
+    onAuthStateChanged(auth, u => { setUser(u); setLoading(false); });
   }, []);
 
-  // 2. Data Fetching
+  // Data Sync
   useEffect(() => {
-    if (!user || !db) return;
-
-    // Players
-    const playersRef = collection(db, 'artifacts', appId, 'public', 'data', 'players');
-    const qPlayers = query(playersRef, orderBy('name'));
-    const unsubPlayers = onSnapshot(qPlayers, (snapshot) => {
-      const data = snapshot.docs.map(doc => {
-        const pData = doc.data();
-        const stats = pData.stats || { power: 5, spin: 5, control: 5, serve: 5, footwork: 5 };
-        return { 
-          id: doc.id, ...pData, stats, overall: calculateOverall(stats),
-          style: pData.style || "분석 전", description: pData.description || ""
-        };
-      });
+    if (!db) return;
+    const unsubP = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'players')), snapshot => {
+      const data = snapshot.docs.map(d => ({ id: d.id, ...d.data(), overall: calculateOverall(d.data().stats) }));
+      // Sort: Rank -> Rating -> Name
+      data.sort((a, b) => (RANK_ORDER[a.rank] - RANK_ORDER[b.rank]) || (b.rating || 1000) - (a.rating || 1000));
       setPlayers(data);
-    }, (err) => console.error("Fetch Error:", err));
-
-    // Matches
-    const matchesRef = collection(db, 'artifacts', appId, 'public', 'data', 'matches');
-    const qMatches = query(matchesRef);
-    const unsubMatches = onSnapshot(qMatches, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      data.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
-      setMatches(data);
-    }, (err) => console.error("Fetch Error:", err));
-
-    return () => { unsubPlayers(); unsubMatches(); };
+    });
+    const unsubM = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'matches'), orderBy('createdAt', 'desc')), snapshot => {
+      setMatches(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => { unsubP(); unsubM(); };
   }, [user]);
 
-  // Actions
-  const handleAddPlayer = async (e) => {
+  // Handlers
+  const handleSavePlayer = async (e) => {
     e.preventDefault();
-    if (!newPlayerName.trim()) return;
-    setIsAnalyzing(true);
+    setIsProcessing(true);
     try {
-      const aiResult = await fetchAIAnalysis(newPlayerStats, newPlayerName.trim());
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'players'), {
-        name: newPlayerName.trim(),
-        stats: newPlayerStats,
-        style: aiResult.style,
-        description: aiResult.description,
-        createdAt: serverTimestamp()
-      });
-      setNewPlayerName('');
-      setNewPlayerStats({ power: 5, spin: 5, control: 5, serve: 5, footwork: 5 });
-      setShowAddPlayer(false);
+      // 1. New Player
+      if (!selectedPlayer) {
+        const ai = await fetchAIAnalysis(playerForm.stats, playerForm.name);
+        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'players'), {
+          ...playerForm, style: ai.style, description: ai.description, rating: 1000, createdAt: serverTimestamp()
+        });
+        setShowAddPlayer(false);
+      } 
+      // 2. Edit Player
+      else {
+        const statsChanged = JSON.stringify(playerForm.stats) !== JSON.stringify(selectedPlayer.stats);
+        let updates = { ...playerForm };
+        
+        // Only regenerate AI report if stats changed
+        if (statsChanged) {
+          const ai = await fetchAIAnalysis(playerForm.stats, playerForm.name);
+          updates.style = ai.style;
+          updates.description = ai.description;
+        }
+
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'players', selectedPlayer.id), updates);
+        setSelectedPlayer(null); // Close modal
+      }
+      setPlayerForm({ name: '', rank: '이병', stats: { power: 5, spin: 5, control: 5, serve: 5, footwork: 5 } });
     } catch (err) {
-      alert("등록 실패: " + err.message);
+      alert("Error: " + err.message);
     } finally {
-      setIsAnalyzing(false);
+      setIsProcessing(false);
+      setIsEditing(false);
     }
   };
 
-  const handleDeletePlayer = async (id) => {
-    if (!window.confirm("삭제하시겠습니까?")) return;
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'players', id));
-      if (selectedPlayer?.id === id) setSelectedPlayer(null);
-    } catch (err) {
-      alert("삭제 실패: " + err.message);
-    }
-  };
-
-  const handleAddMatch = async (e) => {
+  const handleMatchSubmit = async (e) => {
     e.preventDefault();
-    if (!matchForm.p1 || !matchForm.p2 || !matchForm.s1 || !matchForm.s2) {
-      alert("모든 항목을 입력해주세요."); return;
-    }
-    if (matchForm.p1 === matchForm.p2) {
-      alert("서로 다른 선수를 선택해주세요."); return;
-    }
+    if (matchForm.p1 === matchForm.p2) return alert("동일 인물 불가");
+    setIsProcessing(true);
+
     try {
+      const p1 = players.find(p => p.id === matchForm.p1);
+      const p2 = players.find(p => p.id === matchForm.p2);
+      const s1 = parseInt(matchForm.s1);
+      const s2 = parseInt(matchForm.s2);
+      const scoreDiff = Math.abs(s1 - s2);
+
+      // ELO Calculation
+      const r1 = p1.rating || 1000;
+      const r2 = p2.rating || 1000;
+      
+      let newR1 = r1, newR2 = r2;
+      let winnerId = null;
+
+      if (s1 > s2) {
+        const change = calculateEloChange(r1, r2, scoreDiff);
+        newR1 += change; newR2 -= change;
+        winnerId = p1.id;
+      } else if (s2 > s1) {
+        const change = calculateEloChange(r2, r1, scoreDiff);
+        newR2 += change; newR1 -= change;
+        winnerId = p2.id;
+      }
+
+      // 1. Record Match
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'matches'), {
-        player1Id: matchForm.p1, player2Id: matchForm.p2,
-        score1: parseInt(matchForm.s1), score2: parseInt(matchForm.s2),
-        player1Name: players.find(p => p.id === matchForm.p1)?.name || 'Unknown',
-        player2Name: players.find(p => p.id === matchForm.p2)?.name || 'Unknown',
+        player1Id: p1.id, player1Name: p1.name, score1: s1,
+        player2Id: p2.id, player2Name: p2.name, score2: s2,
+        bet: selectedBet ? selectedBet.label : null,
+        winnerId,
         createdAt: serverTimestamp()
       });
-      setMatchForm({ p1: '', p2: '', s1: '', s2: '' });
+
+      // 2. Update Ratings
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'players', p1.id), { rating: newR1 });
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'players', p2.id), { rating: newR2 });
+
       setShowAddMatch(false);
+      setMatchForm({ p1: '', p2: '', s1: '', s2: '' });
+      setSelectedBet(null);
     } catch (err) {
-      alert("기록 실패: " + err.message);
+      alert("Error: " + err.message);
+    } finally {
+      setIsProcessing(false);
     }
   };
 
-  const handleDeleteMatch = async (id) => {
-    if (!window.confirm("삭제하시겠습니까?")) return;
-    try { await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'matches', id)); } 
-    catch (err) { alert("삭제 실패: " + err.message); }
+  const handleAnalyzeMatch = async () => {
+    if (!selectedPlayer) return;
+    setMatchAnalysis("분석 중...");
+    const playerMatches = matches.filter(m => m.player1Id === selectedPlayer.id || m.player2Id === selectedPlayer.id);
+    const result = await fetchMatchAnalysis(selectedPlayer, playerMatches);
+    setMatchAnalysis(result);
   };
 
-  // Ranking
-  const rankings = useMemo(() => {
-    const stats = {};
-    players.forEach(p => { stats[p.id] = { ...p, wins: 0, losses: 0, games: 0, winRate: 0 }; });
-    matches.forEach(m => {
-      const update = (pid, win) => {
-        if (!stats[pid]) stats[pid] = { id: pid, name: pid === m.player1Id ? m.player1Name : m.player2Name, wins: 0, losses: 0, games: 0, winRate: 0 };
-        stats[pid].games++;
-        if (win) stats[pid].wins++; else stats[pid].losses++;
-      };
-      if (m.score1 > m.score2) { update(m.player1Id, true); update(m.player2Id, false); }
-      else if (m.score2 > m.score1) { update(m.player1Id, false); update(m.player2Id, true); }
+  const openEditMode = () => {
+    if (!selectedPlayer) return;
+    setPlayerForm({
+      name: selectedPlayer.name,
+      rank: selectedPlayer.rank || '이병',
+      stats: { ...selectedPlayer.stats }
     });
-    return Object.values(stats)
-      .map(s => ({ ...s, winRate: s.games ? Math.round((s.wins / s.games) * 100) : 0 }))
-      .sort((a, b) => b.wins - a.wins || b.winRate - a.winRate);
-  }, [players, matches]);
+    setIsEditing(true);
+  };
 
-  // UI Renderers
-  const renderPlayers = () => (
-    <div className="p-4 space-y-4 pb-24">
-      <div className="flex justify-between items-center mb-4">
-        <h2 className="text-lg font-bold text-gray-800">등록된 선수 ({players.length})</h2>
-        <button onClick={() => setShowAddPlayer(true)} className="bg-gray-900 text-white px-4 py-2 rounded-full text-sm font-medium flex items-center gap-1 active:scale-95 transition-transform">
-          <Plus size={16} /> 선수 등록
-        </button>
-      </div>
-      {players.length === 0 ? <EmptyState message="등록된 선수가 없습니다." icon={Users} /> : (
-        <div className="grid grid-cols-1 gap-3">
-          {players.map(p => (
-            <div key={p.id} onClick={() => setSelectedPlayer(p)} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 cursor-pointer active:scale-[0.98] transition-transform flex justify-between items-center">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 bg-red-50 text-red-600 rounded-full flex items-center justify-center font-bold text-lg border border-red-100">{p.name.charAt(0)}</div>
-                <div>
-                  <h3 className="font-bold text-gray-900">{p.name}</h3>
-                  <div className="flex items-center gap-2 mt-1">
-                    <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full border border-gray-200">OVR <span className="font-bold">{p.overall}</span></span>
-                    <span className="text-xs text-blue-600 font-medium truncate max-w-[120px]">{p.style}</span>
+  // --- Render Helpers ---
+  const getPlayerRecord = (pid) => {
+    const myMatches = matches.filter(m => m.player1Id === pid || m.player2Id === pid);
+    const wins = myMatches.filter(m => m.winnerId === pid).length;
+    const losses = myMatches.length - wins;
+    return { wins, losses, total: myMatches.length };
+  };
+
+  if (loading) return <div className="h-screen flex items-center justify-center"><Loader2 className="animate-spin text-red-600" /></div>;
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-24">
+      {/* Header */}
+      <header className="bg-red-600 text-white p-4 sticky top-0 z-10 shadow-lg">
+        <div className="flex items-center justify-center gap-2">
+          <Trophy className="text-yellow-300" />
+          <h1 className="text-xl font-bold italic tracking-wider">59전대 탁구왕</h1>
+        </div>
+      </header>
+
+      <main className="max-w-md mx-auto p-4">
+        {/* Tab 1: Players */}
+        {activeTab === 'players' && (
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <h2 className="text-lg font-bold">선수단 랭킹</h2>
+              <button onClick={() => { setIsEditing(false); setPlayerForm({name:'', rank:'이병', stats:{power:5,spin:5,control:5,serve:5,footwork:5}}); setShowAddPlayer(true); }} className="bg-gray-900 text-white px-4 py-2 rounded-full text-sm font-bold flex items-center gap-1">
+                <Plus size={16} /> 등록
+              </button>
+            </div>
+            
+            {players.map((p, i) => {
+              const rec = getPlayerRecord(p.id);
+              return (
+                <div key={p.id} onClick={() => { setSelectedPlayer(p); setMatchAnalysis(null); setIsEditing(false); }} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center gap-4 cursor-pointer active:scale-[0.98] transition-all">
+                  <div className="text-xl font-bold text-gray-400 w-6 text-center">{i + 1}</div>
+                  <div className="relative">
+                    <div className="w-12 h-12 bg-red-50 text-red-600 rounded-full flex items-center justify-center font-bold text-lg border border-red-100">
+                      {p.name.charAt(0)}
+                    </div>
+                    <div className="absolute -bottom-1 -right-1 bg-gray-800 text-white text-[10px] px-1.5 py-0.5 rounded shadow">{p.rank}</div>
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex justify-between items-center">
+                      <h3 className="font-bold text-gray-900">{p.name}</h3>
+                      <span className="text-sm font-mono font-bold text-blue-600">{p.rating || 1000} MMR</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-gray-500 mt-1">
+                      <span className="bg-gray-100 px-2 py-0.5 rounded">OVR {p.overall}</span>
+                      <span>{rec.wins}승 {rec.losses}패 ({rec.total ? Math.round(rec.wins/rec.total*100) : 0}%)</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Tab 2: Betting */}
+        {activeTab === 'betting' && (
+          <div className="space-y-4">
+            <h2 className="text-lg font-bold flex items-center gap-2"><Utensils size={20} /> 내기빵 매치</h2>
+            <div className="grid grid-cols-2 gap-3">
+              {BETS.map(bet => (
+                <button key={bet.id} onClick={() => { setSelectedBet(bet); setShowAddMatch(true); }} className={`${bet.color} p-4 rounded-xl font-bold shadow-sm hover:opacity-80 transition-opacity flex flex-col items-center gap-2 py-6`}>
+                  <span className="text-2xl">{bet.label.split(' ')[0]}</span>
+                  <span className="text-sm">{bet.label.split(' ')[1] || bet.label}</span>
+                </button>
+              ))}
+            </div>
+            <div className="mt-8">
+              <h3 className="font-bold text-gray-500 mb-2 text-sm">최근 내기 기록</h3>
+              {matches.filter(m => m.bet).map(m => (
+                <div key={m.id} className="bg-white p-3 rounded-lg border border-gray-100 mb-2 flex justify-between items-center text-sm">
+                  <span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded text-xs font-bold">{m.bet}</span>
+                  <div className="flex gap-2">
+                    <span className={m.score1 > m.score2 ? 'font-bold' : 'text-gray-500'}>{m.player1Name}</span>
+                    <span className="text-gray-300">vs</span>
+                    <span className={m.score2 > m.score1 ? 'font-bold' : 'text-gray-500'}>{m.player2Name}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Tab 3: Matches (List) */}
+        {activeTab === 'matches' && (
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <h2 className="text-lg font-bold">경기 기록</h2>
+              <button onClick={() => { setSelectedBet(null); setShowAddMatch(true); }} className="bg-red-600 text-white px-4 py-2 rounded-full text-sm font-bold flex items-center gap-1 shadow-red-200 shadow-lg">
+                <Swords size={16} /> 경기 추가
+              </button>
+            </div>
+            {matches.map(m => (
+              <div key={m.id} className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 relative overflow-hidden">
+                {m.bet && <div className="absolute top-0 right-0 bg-yellow-400 text-white text-[10px] font-bold px-2 py-1 rounded-bl-lg shadow-sm">{m.bet}</div>}
+                <div className="flex justify-between items-center">
+                  <div className={`text-center flex-1 ${m.score1 > m.score2 ? 'font-bold text-gray-900' : 'text-gray-400'}`}>
+                    <div className="text-sm mb-1">{m.player1Name}</div>
+                    <div className="text-2xl">{m.score1}</div>
+                  </div>
+                  <div className="text-gray-300 text-xs font-bold px-2">VS</div>
+                  <div className={`text-center flex-1 ${m.score2 > m.score1 ? 'font-bold text-gray-900' : 'text-gray-400'}`}>
+                    <div className="text-sm mb-1">{m.player2Name}</div>
+                    <div className="text-2xl">{m.score2}</div>
                   </div>
                 </div>
               </div>
-              <ChevronRight size={18} className="text-gray-300" />
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-
-  const renderMatches = () => (
-    <div className="p-4 space-y-4 pb-24">
-      <div className="flex justify-between items-center mb-4">
-        <h2 className="text-lg font-bold text-gray-800">최근 경기 ({matches.length})</h2>
-        <button onClick={() => setShowAddMatch(true)} className="bg-red-600 text-white px-4 py-2 rounded-full text-sm font-medium flex items-center gap-1 shadow-lg shadow-red-200 active:scale-95 transition-transform">
-          <Swords size={16} /> 경기 기록
-        </button>
-      </div>
-      {matches.length === 0 ? <EmptyState message="아직 경기 기록이 없습니다." icon={Swords} /> : (
-        <div className="space-y-3">
-          {matches.map(m => (
-            <div key={m.id} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden relative">
-              <div className="absolute inset-x-0 bottom-0 h-1 bg-gradient-to-r from-blue-500 via-transparent to-red-500 opacity-20"></div>
-              <div className="flex justify-between items-center p-4">
-                <div className={`flex-1 text-center ${m.score1 > m.score2 ? 'font-bold text-gray-900' : 'text-gray-500'}`}>
-                  <div className="text-lg">{m.player1Name}</div>
-                  <div className={`text-2xl mt-1 ${m.score1 > m.score2 ? 'text-blue-600' : 'text-gray-400'}`}>{m.score1}</div>
-                </div>
-                <div className="px-2 text-gray-300 text-sm font-mono">VS</div>
-                <div className={`flex-1 text-center ${m.score2 > m.score1 ? 'font-bold text-gray-900' : 'text-gray-500'}`}>
-                  <div className="text-lg">{m.player2Name}</div>
-                  <div className={`text-2xl mt-1 ${m.score2 > m.score1 ? 'text-red-600' : 'text-gray-400'}`}>{m.score2}</div>
-                </div>
-                <button onClick={() => handleDeleteMatch(m.id)} className="absolute top-2 right-2 text-gray-300 hover:text-red-500"><Trash2 size={14} /></button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-
-  const renderRecords = () => (
-    <div className="p-4 space-y-4 pb-24">
-      <h2 className="text-lg font-bold text-gray-800 mb-4">전체 랭킹</h2>
-      {rankings.length === 0 ? <EmptyState message="데이터가 부족합니다." icon={Medal} /> : (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-          <table className="w-full text-sm text-left">
-            <thead className="text-xs text-gray-500 uppercase bg-gray-50 border-b border-gray-100">
-              <tr><th className="px-4 py-3 text-center">#</th><th className="px-4 py-3">이름</th><th className="px-4 py-3 text-center">승</th><th className="px-4 py-3 text-center">패</th><th className="px-4 py-3 text-center">승률</th></tr>
-            </thead>
-            <tbody>
-              {rankings.map((p, i) => (
-                <tr key={p.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50">
-                  <td className="px-4 py-3 text-center font-bold text-gray-400">{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i + 1}</td>
-                  <td className="px-4 py-3 font-medium text-gray-900">{p.name}<span className="block text-[10px] text-gray-400">OVR {p.overall}</span></td>
-                  <td className="px-4 py-3 text-center text-blue-600 font-bold">{p.wins}</td>
-                  <td className="px-4 py-3 text-center text-red-500">{p.losses}</td>
-                  <td className="px-4 py-3 text-center font-bold">{p.winRate}%</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-
-  if (loading) return <div className="h-screen bg-white flex flex-col items-center justify-center"><LoadingSpinner /><p className="text-gray-400 text-sm mt-4">데이터 불러오는 중...</p></div>;
-
-  return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-safe">
-      <header className="bg-red-600 text-white p-4 shadow-lg sticky top-0 z-10 flex items-center justify-center relative">
-        <div className="flex items-center gap-2"><Trophy className="text-yellow-300" /><h1 className="text-xl font-bold italic tracking-wider">59전대 탁구왕</h1></div>
-      </header>
-
-      {error && (
-        <div className="m-4 p-4 bg-red-50 text-red-700 rounded-lg flex items-start gap-2 text-sm border border-red-100">
-          <AlertCircle className="shrink-0 mt-0.5" size={16} />
-          <span>{error}</span>
-        </div>
-      )}
-
-      <main className="max-w-md mx-auto min-h-[calc(100vh-140px)]">
-        {activeTab === 'players' && renderPlayers()}
-        {activeTab === 'matches' && renderMatches()}
-        {activeTab === 'records' && renderRecords()}
+            ))}
+          </div>
+        )}
       </main>
 
-      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 px-6 py-2 flex justify-between items-center z-20 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] pb-safe-bottom">
+      {/* Navigation */}
+      <nav className="fixed bottom-0 w-full bg-white border-t border-gray-200 px-6 py-2 flex justify-between z-20 pb-safe">
         {[
           { id: 'players', icon: Users, label: '선수단' },
-          { id: 'matches', icon: Swords, label: '경기장' },
-          { id: 'records', icon: History, label: '기록실' }
+          { id: 'betting', icon: Utensils, label: '내기빵' },
+          { id: 'matches', icon: History, label: '기록실' }
         ].map(tab => (
-          <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex flex-col items-center gap-1 p-2 rounded-lg transition-colors ${activeTab === tab.id ? 'text-red-600' : 'text-gray-400 hover:text-gray-600'}`}>
+          <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex flex-col items-center gap-1 p-2 ${activeTab === tab.id ? 'text-red-600' : 'text-gray-300'}`}>
             <tab.icon size={24} strokeWidth={activeTab === tab.id ? 2.5 : 2} />
-            <span className="text-xs font-medium">{tab.label}</span>
+            <span className="text-[10px] font-bold">{tab.label}</span>
           </button>
         ))}
       </nav>
 
-      {/* Modals */}
+      {/* --- Modals --- */}
+
+      {/* 1. Add/Edit Player Modal */}
       {showAddPlayer && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl w-full max-w-sm max-h-[90vh] overflow-y-auto shadow-xl p-6">
-            <h3 className="text-xl font-bold mb-4">새 선수 등록</h3>
-            <form onSubmit={handleAddPlayer}>
-              <div className="mb-6"><label className="block text-sm font-medium text-gray-700 mb-1">이름</label><input type="text" className="w-full border border-gray-300 rounded-lg p-3" value={newPlayerName} onChange={e => setNewPlayerName(e.target.value)} disabled={isAnalyzing} /></div>
-              <div className="space-y-4 mb-6">
-                <p className="text-sm font-bold text-gray-800 border-b pb-2">능력치 (1-10)</p>
-                {[ {k:'power',l:'💥 파워'}, {k:'spin',l:'🌪️ 스핀'}, {k:'control',l:'🎯 컨트롤'}, {k:'serve',l:'🚀 서브'}, {k:'footwork',l:'🏃 풋워크'} ].map(s => (
-                  <div key={s.k}>
-                    <div className="flex justify-between text-xs mb-1"><label>{s.l}</label><span className="font-bold text-red-600">{newPlayerStats[s.k]}</span></div>
-                    <input type="range" min="1" max="10" step="1" className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-red-600" value={newPlayerStats[s.k]} onChange={e => setNewPlayerStats({...newPlayerStats, [s.k]: parseInt(e.target.value)})} disabled={isAnalyzing} />
-                  </div>
+          <div className="bg-white rounded-2xl w-full max-w-sm max-h-[90vh] overflow-y-auto p-6">
+            <h3 className="text-xl font-bold mb-4">{isEditing ? '선수 정보 수정' : '새 선수 등록'}</h3>
+            <form onSubmit={handleSavePlayer}>
+              <div className="flex gap-2 mb-4">
+                <div className="flex-1">
+                  <label className="block text-xs font-bold text-gray-500 mb-1">이름</label>
+                  <input required type="text" className="w-full border p-2 rounded-lg" value={playerForm.name} onChange={e => setPlayerForm({...playerForm, name: e.target.value})} disabled={isProcessing} />
+                </div>
+                <div className="w-24">
+                  <label className="block text-xs font-bold text-gray-500 mb-1">계급</label>
+                  <select className="w-full border p-2 rounded-lg" value={playerForm.rank} onChange={e => setPlayerForm({...playerForm, rank: e.target.value})}>
+                    {RANKS.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </div>
+              </div>
+              
+              <div className="space-y-3 mb-6 bg-gray-50 p-4 rounded-xl">
+                <p className="text-xs font-bold text-gray-500 mb-2">능력치 설정 (1-10)</p>
+                {Object.keys(playerForm.stats).map(k => (
+                  <StatBar key={k} label={k.toUpperCase()} value={playerForm.stats[k]} editable={true} onChange={(val) => setPlayerForm(p => ({...p, stats: {...p.stats, [k]: val}}))} />
                 ))}
               </div>
+
               <div className="flex gap-2">
-                <button type="button" onClick={() => setShowAddPlayer(false)} className="flex-1 py-3 bg-gray-100 rounded-lg" disabled={isAnalyzing}>취소</button>
-                <button type="submit" className="flex-1 bg-red-600 text-white rounded-lg py-3 flex items-center justify-center gap-2" disabled={isAnalyzing}>{isAnalyzing ? <><Loader2 className="animate-spin" size={18} /> 분석중...</> : "등록"}</button>
+                <button type="button" onClick={() => setShowAddPlayer(false)} className="flex-1 py-3 bg-gray-100 rounded-lg font-bold text-gray-500">취소</button>
+                <button type="submit" disabled={isProcessing} className="flex-1 bg-gray-900 text-white rounded-lg py-3 font-bold flex items-center justify-center gap-2">
+                  {isProcessing && <Loader2 className="animate-spin" size={16} />}
+                  {isEditing ? '저장' : '등록'}
+                </button>
               </div>
             </form>
           </div>
         </div>
       )}
 
+      {/* 2. Player Detail Modal */}
+      {selectedPlayer && !isEditing && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="bg-red-600 p-4 flex justify-between items-center text-white">
+              <h3 className="font-bold flex items-center gap-2"><Activity size={18} /> 선수 카드</h3>
+              <div className="flex gap-2">
+                <button onClick={() => { openEditMode(); setShowAddPlayer(true); }}><Pencil size={20} /></button>
+                <button onClick={() => setSelectedPlayer(null)}><X size={20} /></button>
+              </div>
+            </div>
+            <div className="p-6">
+              <div className="flex justify-between items-start mb-6">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="bg-gray-800 text-white text-[10px] px-1.5 py-0.5 rounded">{selectedPlayer.rank}</span>
+                    <h2 className="text-2xl font-bold">{selectedPlayer.name}</h2>
+                  </div>
+                  <p className="text-sm text-blue-600 font-bold mt-1">{selectedPlayer.style}</p>
+                </div>
+                <div className="text-center">
+                   <div className="text-xs text-gray-400 font-bold">RATING</div>
+                   <div className="text-2xl font-black text-red-600 italic">{selectedPlayer.rating || 1000}</div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 mb-6 text-center bg-gray-50 p-3 rounded-xl">
+                <div><div className="text-xs text-gray-400">승</div><div className="font-bold">{getPlayerRecord(selectedPlayer.id).wins}</div></div>
+                <div><div className="text-xs text-gray-400">패</div><div className="font-bold">{getPlayerRecord(selectedPlayer.id).losses}</div></div>
+                <div><div className="text-xs text-gray-400">승률</div><div className="font-bold text-red-500">{getPlayerRecord(selectedPlayer.id).total ? Math.round(getPlayerRecord(selectedPlayer.id).wins/getPlayerRecord(selectedPlayer.id).total*100) : 0}%</div></div>
+              </div>
+
+              <div className="space-y-2 mb-6">
+                {Object.keys(selectedPlayer.stats).map(k => (
+                  <StatBar key={k} label={k.toUpperCase()} value={selectedPlayer.stats[k]} />
+                ))}
+              </div>
+
+              <div className="bg-blue-50 p-4 rounded-xl border border-blue-100 mb-4">
+                <div className="flex items-center gap-2 mb-2 text-blue-800 font-bold text-sm">
+                  <Brain size={16} /> AI 리포트
+                </div>
+                <p className="text-xs text-blue-700 leading-relaxed">{selectedPlayer.description}</p>
+              </div>
+
+              {matchAnalysis ? (
+                <div className="bg-gray-900 text-gray-100 p-4 rounded-xl text-xs leading-relaxed animate-in fade-in slide-in-from-bottom-2">
+                  <div className="font-bold text-yellow-400 mb-2 flex items-center gap-2"><Activity size={14}/> 전적 정밀 분석</div>
+                  {matchAnalysis}
+                </div>
+              ) : (
+                <button onClick={handleAnalyzeMatch} className="w-full py-3 bg-gray-100 hover:bg-gray-200 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors">
+                  <Activity size={16} /> 최근 전적 분석하기 (AI)
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Add Match Modal */}
       {showAddMatch && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-sm p-6 shadow-xl">
-            <h3 className="text-xl font-bold mb-4">경기 결과</h3>
-            <form onSubmit={handleAddMatch}>
-              <div className="flex items-center gap-2 mb-4">
-                <div className="flex-1"><label className="block text-xs mb-1">선수 1</label><select className="w-full border p-2 rounded-lg" value={matchForm.p1} onChange={e => setMatchForm({...matchForm, p1: e.target.value})}><option value="">선택</option>{players.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
-                <div className="flex-1"><label className="block text-xs mb-1">점수</label><input type="number" className="w-full border p-2 rounded-lg text-center" value={matchForm.s1} onChange={e => setMatchForm({...matchForm, s1: e.target.value})} /></div>
-              </div>
-              <div className="flex items-center justify-center mb-4 font-bold text-gray-400">VS</div>
+            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+              {selectedBet ? <><span className="text-2xl">⚡</span> {selectedBet.label} 매치</> : '경기 기록'}
+            </h3>
+            <form onSubmit={handleMatchSubmit}>
               <div className="flex items-center gap-2 mb-6">
-                <div className="flex-1"><label className="block text-xs mb-1">선수 2</label><select className="w-full border p-2 rounded-lg" value={matchForm.p2} onChange={e => setMatchForm({...matchForm, p2: e.target.value})}><option value="">선택</option>{players.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
-                <div className="flex-1"><label className="block text-xs mb-1">점수</label><input type="number" className="w-full border p-2 rounded-lg text-center" value={matchForm.s2} onChange={e => setMatchForm({...matchForm, s2: e.target.value})} /></div>
+                <div className="flex-1 text-center">
+                  <select required className="w-full border p-2 rounded-lg mb-2 text-sm" value={matchForm.p1} onChange={e => setMatchForm({...matchForm, p1: e.target.value})}>
+                    <option value="">선수 1</option>
+                    {players.map(p => <option key={p.id} value={p.id}>{p.rank} {p.name}</option>)}
+                  </select>
+                  <input required type="number" placeholder="점수" className="w-full border p-2 rounded-lg text-center font-bold text-lg" value={matchForm.s1} onChange={e => setMatchForm({...matchForm, s1: e.target.value})} />
+                </div>
+                <div className="font-bold text-gray-300">VS</div>
+                <div className="flex-1 text-center">
+                  <select required className="w-full border p-2 rounded-lg mb-2 text-sm" value={matchForm.p2} onChange={e => setMatchForm({...matchForm, p2: e.target.value})}>
+                    <option value="">선수 2</option>
+                    {players.map(p => <option key={p.id} value={p.id}>{p.rank} {p.name}</option>)}
+                  </select>
+                  <input required type="number" placeholder="점수" className="w-full border p-2 rounded-lg text-center font-bold text-lg" value={matchForm.s2} onChange={e => setMatchForm({...matchForm, s2: e.target.value})} />
+                </div>
               </div>
               <div className="flex gap-2">
-                <button type="button" onClick={() => setShowAddMatch(false)} className="flex-1 py-3 bg-gray-100 rounded-lg">취소</button>
-                <button type="submit" className="flex-1 bg-red-600 text-white rounded-lg py-3">저장</button>
+                <button type="button" onClick={() => setShowAddMatch(false)} className="flex-1 py-3 bg-gray-100 rounded-lg font-bold text-gray-500">취소</button>
+                <button type="submit" disabled={isProcessing} className="flex-1 bg-red-600 text-white rounded-lg py-3 font-bold">
+                  {isProcessing ? '기록 중...' : '경기 종료'}
+                </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
-
-      {selectedPlayer && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl">
-            <div className="bg-red-600 p-4 flex justify-between items-center text-white"><h3 className="text-lg font-bold flex items-center gap-2"><Activity size={18} /> 선수 분석</h3><button onClick={() => setSelectedPlayer(null)}><X size={20} /></button></div>
-            <div className="p-6">
-              <div className="flex justify-between items-center mb-6">
-                <div><h2 className="text-2xl font-bold">{selectedPlayer.name}</h2><p className="text-sm text-gray-500">{selectedPlayer.style}</p></div>
-                <div className="text-center bg-red-50 px-3 py-2 rounded-lg border border-red-100"><div className="text-xs text-red-400 font-bold">OVR</div><div className="text-2xl font-black text-red-600">{selectedPlayer.overall}</div></div>
-              </div>
-              <div className="space-y-3 mb-6 bg-gray-50 p-4 rounded-xl border border-gray-100">
-                <StatBar label="💥 파워" value={selectedPlayer.stats.power} color="bg-red-500" /><StatBar label="🌪️ 스핀" value={selectedPlayer.stats.spin} color="bg-orange-500" /><StatBar label="🎯 컨트롤" value={selectedPlayer.stats.control} color="bg-green-500" /><StatBar label="🚀 서브" value={selectedPlayer.stats.serve} color="bg-purple-500" /><StatBar label="🏃 풋워크" value={selectedPlayer.stats.footwork} color="bg-blue-500" />
-              </div>
-              <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 flex gap-2 mb-6 items-start"><Brain className="text-blue-600 shrink-0 mt-1" size={20} /><div className="text-xs text-blue-800 leading-relaxed"><span className="font-bold block mb-1">AI 리포트:</span> {selectedPlayer.description}</div></div>
-              <button onClick={() => handleDeletePlayer(selectedPlayer.id)} className="w-full py-3 text-red-500 text-sm font-medium bg-red-50 rounded-lg flex items-center justify-center gap-2"><Trash2 size={16} /> 선수 삭제</button>
-            </div>
           </div>
         </div>
       )}
