@@ -78,7 +78,7 @@ const groupMatchesByDate = (matchList) => {
   }, {});
 };
 
-// --- AI API Functions (생략 가능하나 유지) ---
+// --- AI API Functions ---
 const getApiKey = () => {
   try {
     if (import.meta.env && import.meta.env.VITE_PERPLEXITY_API_KEY) return import.meta.env.VITE_PERPLEXITY_API_KEY;
@@ -114,6 +114,7 @@ const fetchMatchAnalysis = async (player, playerMatches) => {
       method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: "sonar", messages: [{ role: "system", content: "Warm coach." }, { role: "user", content: prompt }] })
     });
+    const data = await res.json();
     return data.choices[0].message.content;
   } catch (e) { return "전적 분석 중 오류가 발생했습니다."; }
 };
@@ -167,7 +168,8 @@ export default function PingPongApp() {
     if (!db) return;
     const unsubP = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'players')), snapshot => {
       const data = snapshot.docs.map(d => ({ id: d.id, ...d.data(), overall: calculateOverall(d.data().stats) }));
-      data.sort((a, b) => (RANK_ORDER[a.rank] - RANK_ORDER[b.rank]) || (b.rating || 1000) - (a.rating || 1000));
+      // 수정된 정렬 로직: 점수(Rating) 높은순 -> 계급 높은순 -> 이름순
+      data.sort((a, b) => (b.rating || 1000) - (a.rating || 1000) || (RANK_ORDER[a.rank] - RANK_ORDER[b.rank]));
       setPlayers(data);
     });
     const unsubM = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'matches'), orderBy('createdAt', 'desc')), snapshot => {
@@ -182,12 +184,14 @@ export default function PingPongApp() {
     setIsProcessing(true);
     try {
       if (!selectedPlayer) {
+        // 등록
         const ai = await fetchAIAnalysis(playerForm.stats, playerForm.name);
         await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'players'), {
           ...playerForm, style: ai.style, description: ai.description, rating: 1000, createdAt: serverTimestamp()
         });
         setShowAddPlayer(false);
       } else {
+        // 수정
         const statsChanged = JSON.stringify(playerForm.stats) !== JSON.stringify(selectedPlayer.stats);
         let updates = { ...playerForm };
         if (statsChanged) {
@@ -196,11 +200,25 @@ export default function PingPongApp() {
           updates.description = ai.description;
         }
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'players', selectedPlayer.id), updates);
-        setSelectedPlayer(null);
+        // 수정 완료 시 폼 닫고, 수정 모드 종료, 선택된 플레이어 해제(목록으로 이동)
+        setShowAddPlayer(false);
+        setIsEditing(false);
+        setSelectedPlayer(null); 
       }
       setPlayerForm({ name: '', rank: '이병', stats: { power: 5, spin: 5, control: 5, serve: 5, footwork: 5 } });
     } catch (err) { alert("오류: " + err.message); } 
-    finally { setIsProcessing(false); setIsEditing(false); }
+    finally { setIsProcessing(false); }
+  };
+
+  const openEditMode = () => {
+    if (!selectedPlayer) return;
+    setPlayerForm({
+      name: selectedPlayer.name,
+      rank: selectedPlayer.rank || '이병',
+      stats: { ...selectedPlayer.stats }
+    });
+    setIsEditing(true); // 수정 모드 활성화 (상세 카드 숨김)
+    setShowAddPlayer(true); // 폼 모달 열기
   };
 
   const handleDeletePlayer = async (id) => {
@@ -255,7 +273,6 @@ export default function PingPongApp() {
     return { wins, losses: myMatches.length - wins, total: myMatches.length, history: myMatches };
   };
 
-  // Grouped Matches
   const groupedMatches = useMemo(() => groupMatchesByDate(matches), [matches]);
   const groupedBets = useMemo(() => groupMatchesByDate(matches.filter(m => m.bet)), [matches]);
 
@@ -273,7 +290,7 @@ export default function PingPongApp() {
         {activeTab === 'players' && (
           <div className="space-y-4">
             <div className="flex justify-between items-center">
-              <h2 className="text-lg font-bold">선수단 랭킹</h2>
+              <h2 className="text-lg font-bold">선수단 랭킹 (ELO순)</h2>
               <button onClick={() => { setIsEditing(false); setPlayerForm({name:'', rank:'이병', stats:{power:5,spin:5,control:5,serve:5,footwork:5}}); setShowAddPlayer(true); }} className="bg-gray-900 text-white px-4 py-2 rounded-full text-sm font-bold flex items-center gap-1">
                 <Plus size={16} /> 등록
               </button>
@@ -366,7 +383,6 @@ export default function PingPongApp() {
                   <div className="space-y-3">
                     {groupedMatches[date].map(m => (
                       <div key={m.id} className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 relative overflow-hidden">
-                         {/* 삭제 버튼 */}
                          <button onClick={() => handleDeleteMatch(m.id)} className="absolute top-2 right-2 p-1 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors z-10">
                             <Trash2 size={14} />
                          </button>
@@ -404,6 +420,7 @@ export default function PingPongApp() {
       </nav>
 
       {/* --- Modals --- */}
+      {/* 1. Add/Edit Player Modal */}
       {showAddPlayer && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-sm max-h-[90vh] overflow-y-auto p-6">
@@ -417,7 +434,7 @@ export default function PingPongApp() {
                 {Object.keys(playerForm.stats).map(k => <StatBar key={k} label={k.toUpperCase()} value={playerForm.stats[k]} editable={true} onChange={(val) => setPlayerForm(p => ({...p, stats: {...p.stats, [k]: val}}))} />)}
               </div>
               <div className="flex gap-2">
-                <button type="button" onClick={() => setShowAddPlayer(false)} className="flex-1 py-3 bg-gray-100 rounded-lg font-bold text-gray-500">취소</button>
+                <button type="button" onClick={() => { setShowAddPlayer(false); setIsEditing(false); }} className="flex-1 py-3 bg-gray-100 rounded-lg font-bold text-gray-500">취소</button>
                 <button type="submit" disabled={isProcessing} className="flex-1 bg-gray-900 text-white rounded-lg py-3 font-bold flex items-center justify-center gap-2">{isProcessing && <Loader2 className="animate-spin" size={16} />}{isEditing ? '저장' : '등록'}</button>
               </div>
             </form>
@@ -425,13 +442,14 @@ export default function PingPongApp() {
         </div>
       )}
 
+      {/* 2. Player Detail Modal */}
       {selectedPlayer && !isEditing && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl max-h-[90vh] flex flex-col">
             <div className="bg-red-600 p-4 flex justify-between items-center text-white shrink-0">
               <h3 className="font-bold flex items-center gap-2"><Activity size={18} /> 선수 카드</h3>
               <div className="flex gap-2">
-                <button onClick={() => { openEditMode(); setShowAddPlayer(true); }}><Pencil size={20} /></button>
+                <button onClick={openEditMode}><Pencil size={20} /></button>
                 <button onClick={() => setSelectedPlayer(null)}><X size={20} /></button>
               </div>
             </div>
